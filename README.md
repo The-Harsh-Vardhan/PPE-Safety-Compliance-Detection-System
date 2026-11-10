@@ -1,23 +1,58 @@
-# SentinelVision
+# SentinelVision: Real-Time PPE Compliance Monitoring
 
-Real-time PPE compliance monitoring for laboratories and industrial spaces.
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue) ![TypeScript](https://img.shields.io/badge/frontend-TypeScript-3178c6) ![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688) ![YOLO](https://img.shields.io/badge/detection-YOLOv8%20%2B%20YOLOv11-orange)
 
-SentinelVision is an event-driven video processing system that turns noisy, frame-level PPE detections into stable violation events (start / end / duration / evidence) under real-world constraints like occlusion, limited compute, and long-running streams.
+Real-time PPE compliance monitoring for laboratories and industrial spaces. SentinelVision is an event-driven video processing system that turns noisy, frame-level PPE detections into stable violation events (start / end / duration / evidence snapshot) under real-world constraints like occlusion, limited compute, and long-running streams.
 
-The focus is stability under real-world constraints: occlusion, limited processing FPS, false positives, and long-running streams.
+**Docs:** [the-harsh-vardhan.github.io/PPE-Safety-Compliance-Detection-System](https://the-harsh-vardhan.github.io/PPE-Safety-Compliance-Detection-System/) | **Frontend demo mode (sample data, no backend):** [lab-safety-monitor.vercel.app](https://lab-safety-monitor.vercel.app/dashboard)
 
----
+<p align="center">
+  <img src="docs/assets/demo-frame-violation.jpg" alt="Annotated output frame: tracked person with a MISSING: face mask violation overlay" height="420">
+  <img src="docs/assets/demo-frame-two-tracks.jpg" alt="Annotated output frame: two tracked persons with PPE boxes" height="420">
+</p>
 
-## Quick overview
+## What it does
 
-- Problem: monitoring does not scale; per-frame alerts create noise under occlusion
-- Constraints: real-time video, limited compute, multiple people, low tolerance for false alerts
-- System loop: input (video) -> processing (detect/associate/filter) -> output (events + UI updates)
-- Trade-offs: stable event tracking over per-frame accuracy
-- Limitations: face recognition and multi-scale settings depend on image quality and GPU budget
-- Run it: see Setup and Usage
+- Detects and tracks people in a webcam feed or uploaded video (YOLOv8m with native tracking).
+- Detects PPE items, "no PPE" violation classes and eating/drinking actions with a custom YOLOv11 model (12 classes).
+- Associates PPE with each person using segmentation masks (SAM3, with SAM2 fallback) and spatial containment.
+- Filters per-frame noise with EMA confidence fusion and hysteresis, then stores deduplicated violation events with start frame, end frame, duration and a snapshot.
+- Serves a Next.js dashboard with a live MJPEG monitor, an events log, persons view, statistics and WebSocket violation alerts.
 
----
+## Architecture
+
+```mermaid
+flowchart LR
+    SRC["Input<br/>webcam (GET /api/stream/live/feed)<br/>or uploaded video (POST /api/stream/process)"] --> SAMP["Frame sampling<br/>StreamProcessor queue (live)"]
+    SAMP --> PERS["YOLOv8m<br/>person detection + tracking"]
+    PERS --> SEG["SAM3 / SAM2<br/>person masks"]
+    SAMP --> PPE["YOLOv11 (custom)<br/>12 PPE / violation / action classes"]
+    SEG --> ASSOC["PPE-to-person association<br/>mask / box containment"]
+    PPE --> ASSOC
+    ASSOC --> TEMP["Temporal filter<br/>EMA fusion + hysteresis"]
+    TEMP --> DEDUP["Event deduplication<br/>start / ongoing / end + duration"]
+    DEDUP --> DB[("SQLite<br/>events, persons, snapshots")]
+    DEDUP --> WS["WebSocket<br/>/api/ws alerts"]
+    TEMP --> MJPEG["Annotated frames<br/>MJPEG stream / output video"]
+    DB --> API["REST API<br/>/api/events, /persons, /stats"]
+    API --> UI["Next.js dashboard"]
+    WS --> UI
+    MJPEG --> UI
+```
+
+The detector is selected by `DETECTOR_TYPE` (default `hybrid`: YOLOv8 + SAM3/SAM2 + YOLOv11; `yolov11` and `sam3` are also available). More detail in [docs/architecture.md](docs/architecture.md).
+
+## Results
+
+No evaluation metrics (mAP, precision/recall) are published in this repository. The custom YOLOv11 PPE weights and their training data are not included, see [#7](https://github.com/The-Harsh-Vardhan/PPE-Safety-Compliance-Detection-System/issues/7).
+
+## Screenshots
+
+Frames taken from the annotated demo video shipped in `frontend/public/demo/` (pipeline output; the clip carries its stock-footage watermark).
+
+| Tracking | Violation event | Two tracked persons |
+| --- | --- | --- |
+| ![Tracking](docs/assets/demo-frame-tracking.jpg) | ![Violation](docs/assets/demo-frame-violation.jpg) | ![Two tracks](docs/assets/demo-frame-two-tracks.jpg) |
 
 ## Problem
 
@@ -41,7 +76,7 @@ This project assumes:
 
 ---
 
-## Overview
+## Pipeline overview
 
 Pipeline (high level):
 1. Video stream (live or file)
@@ -78,13 +113,14 @@ Streaming (predictable latency):
 
 Event-centric storage (audit-friendly output):
 - Start frame, end frame, duration, evidence snapshot
-- Associated identity when available
+- Person identity is the tracker ID (`person_<track_id>`)
 
 ---
 
 ## Limitations
 
-- Face recognition degrades under heavy occlusion or low resolution
+- A face-embedding module (InsightFace) and a DeepSORT tracker exist in `backend/app/ml/` but are not wired into the runtime pipeline; identities are YOLOv8 track IDs ([#6](https://github.com/The-Harsh-Vardhan/PPE-Safety-Compliance-Detection-System/issues/6))
+- Face recognition would degrade under heavy occlusion or low resolution
 - Multi-scale PPE detection increases GPU memory usage
 - SQLite is used for local-first development and is not intended for horizontal scaling
 
@@ -99,27 +135,22 @@ Event-centric storage (audit-friendly output):
 
 ---
 
-## Stack
+## Tech stack
 
-- Backend: FastAPI (async)
-- Frontend: Next.js 15, Tailwind CSS
-- ML: YOLOv8, YOLOv11 (custom), SAM3, InsightFace
+- Backend: FastAPI (async), SQLAlchemy + aiosqlite
+- Frontend: Next.js 16, React 19, Tailwind CSS, TanStack Query, Recharts
+- ML: YOLOv8m (ultralytics, person tracking), custom YOLOv11 PPE detector, SAM3 / SAM2 segmentation, InsightFace (face embeddings, not wired into the pipeline)
 - Storage: SQLite (async)
 - Streaming: MJPEG + WebSockets
-
----
 
 ## Quick start
 
 ```bash
-git clone https://github.com/garg-tejas/lab-safety-monitor.git
-cd lab-safety-monitor
+git clone https://github.com/The-Harsh-Vardhan/PPE-Safety-Compliance-Detection-System.git
+cd PPE-Safety-Compliance-Detection-System
 ```
 
----
-
-## Setup
-- Prereqs: Python 3.11+, Node.js 18+ (pnpm), `uv` (CUDA GPU recommended)
+Prerequisites: Python 3.11+, Node.js 18+ (pnpm), `uv` (CUDA GPU recommended).
 
 Backend (FastAPI):
 
@@ -142,12 +173,10 @@ URLs:
 - UI: http://localhost:3000
 - API docs: http://localhost:8000/docs
 
-Model weights:
+Model weights (not in the repo):
 - SAM3: `backend/weights/sam3/sam3.pt`
 - YOLOv11 PPE: `backend/weights/ppe_detector/best.pt`
 - If you don't have SAM3 weights, disable SAM3 via env or download weights before running.
-
----
 
 ## Usage
 
@@ -164,26 +193,33 @@ curl -X POST http://localhost:8000/api/stream/process \
   -d '{"video_path": "lab_demo.mp4", "save_output": true}'
 ```
 
-### Start/stop live monitoring
+Poll `GET /api/stream/jobs/{job_id}` for progress and fetch the annotated video from `GET /api/stream/processed/{job_id}`.
 
-```bash
-curl -X POST http://localhost:8000/api/stream/live/start
-curl -X POST http://localhost:8000/api/stream/live/stop
+### Live monitoring
+
+The live monitor is an MJPEG stream from the default webcam (index 0), annotated in real time. Open it in a browser or an `<img>` tag:
+
+```
+http://localhost:8000/api/stream/live/feed
 ```
 
----
+Violation alerts are pushed over the WebSocket at `ws://localhost:8000/api/ws`.
 
 ## Project structure
 
-- `backend/app/api/routes/`: REST endpoints
-- `backend/app/ml/`: ML pipeline
-- `backend/app/services/`: persistence + deduplication
-- `backend/weights/`: model weights
-- `frontend/src/app/`: pages
-- `frontend/src/components/`: UI components
-- `data/`: videos, processed outputs, snapshots
-
----
+```
+backend/app/
+  api/routes/   REST + stream + WebSocket endpoints
+  ml/           detectors, SAM segmenters, temporal filter, stream processor
+  services/     persistence, event deduplication, person service
+  core/         config, database, WebSocket manager
+frontend/src/
+  app/          pages (dashboard, monitor, events, persons, settings)
+  components/   UI components
+  lib/          API client, demo data
+docs/           GitHub Pages site and image assets
+data/           videos, processed outputs, snapshots (git-ignored)
+```
 
 ## Configuration
 
@@ -198,13 +234,9 @@ Copy `backend/.env.example` to `backend/.env`, then adjust the relevant settings
 - `DATABASE_URL`
 - `ENABLE_SNAPSHOT_CAPTURE`, `SNAPSHOTS_DIR`
 
----
-
 ## API
 
 OpenAPI docs are available at `http://localhost:8000/docs` when the backend is running.
-
----
 
 ## ML models
 
@@ -216,13 +248,11 @@ Trained on a lab safety dataset with 12 detection classes:
 - Violations: `no_goggles`, `no_mask`, `no_lab_coat`, `no_gloves`, `no_head_mask`
 - Actions: `drinking`, `eating`
 
-### Pre-trained Models
+### Pre-trained models
 
 - YOLOv8-medium (person detection + tracking)
 - SAM3 (segmentation), SAM2 fallback
-- InsightFace (ArcFace) for face embeddings
-
----
+- InsightFace (ArcFace) for face embeddings (module present, not used by the pipeline)
 
 ## Troubleshooting
 
@@ -263,7 +293,7 @@ CUDA_VISIBLE_DEVICES="" uv run uvicorn app.main:app --reload
 
 4. Check required PPE configuration:
    ```env
-   REQUIRED_PPE=["safety_goggles", "face_mask", "lab_coat"]
+   REQUIRED_PPE=["safety goggles", "face mask", "lab coat"]
    ```
 
 ### Live Stream Lag / Stuttering
@@ -320,3 +350,7 @@ CUDA_VISIBLE_DEVICES="" uv run uvicorn app.main:app --reload
 - InsightFace: DeepInsight ([https://github.com/deepinsight/insightface](https://github.com/deepinsight/insightface))
 - FastAPI: Sebastián Ramírez ([https://fastapi.tiangolo.com](https://fastapi.tiangolo.com))
 - Next.js: Vercel ([https://nextjs.org](https://nextjs.org))
+
+Also developed at [garg-tejas/lab-safety-monitor](https://github.com/garg-tejas/lab-safety-monitor) (merged contributions from that repository).
+
+No LICENSE file is present in the repository.
