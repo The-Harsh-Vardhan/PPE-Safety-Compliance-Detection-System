@@ -1,0 +1,4 @@
+theme: jekyll-theme-cayman
+title: SentinelVision
+description: Real-time PPE compliance monitoring with YOLOv8, YOLOv11 and SAM3, FastAPI and Next.js
+show_downloads: false
